@@ -1,0 +1,1 @@
+/path/to/caldera/map_source/prefabs/br/wz_vg/mp_wz_island/commercial/hotel_01.usd

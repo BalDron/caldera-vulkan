@@ -1,0 +1,20 @@
+#version 450
+#include "common.glsl"
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D inDepthMip;
+layout(binding = 1, r32f) writeonly uniform image2D outDepthMip;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 srcPos = pos * 2;
+
+    vec4 depths;
+    depths.x = texelFetch(inDepthMip, srcPos + ivec2(0, 0), 0).r;
+    depths.y = texelFetch(inDepthMip, srcPos + ivec2(1, 0), 0).r;
+    depths.z = texelFetch(inDepthMip, srcPos + ivec2(0, 1), 0).r;
+    depths.w = texelFetch(inDepthMip, srcPos + ivec2(1, 1), 0).r;
+
+    float maxDepth = max(max(depths.x, depths.y), max(depths.z, depths.w));
+    imageStore(outDepthMip, pos, vec4(maxDepth));
+}

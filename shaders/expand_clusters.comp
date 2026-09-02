@@ -1,0 +1,47 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct MeshClusterRange {
+    uint first_cluster;
+    uint cluster_count;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer InstanceCount {
+    uint visible_instance_count;
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer VisibleInstanceIndices {
+    uint visible_instance_ids[];
+};
+
+layout(std430, set = 0, binding = 2) readonly buffer MeshClusterRangesBuffer {
+    MeshClusterRange mesh_cluster_ranges[];
+};
+
+layout(std430, set = 0, binding = 3) writeonly buffer CandidateClusterIndicesBuffer {
+    uint candidate_cluster_indices[];
+};
+
+layout(std430, set = 0, binding = 4) buffer CandidateCounterBuffer {
+    uint total_candidate_clusters;
+    uint dispatch_x;
+    uint dispatch_y;
+    uint dispatch_z;
+};
+
+void main() {
+    uint g_idx = gl_GlobalInvocationID.x;
+    if (g_idx >= visible_instance_count) return;
+
+    uint inst_id = visible_instance_ids[g_idx];
+    MeshClusterRange range = mesh_cluster_ranges[inst_id];
+
+    
+    uint write_offset = atomicAdd(total_candidate_clusters, range.cluster_count);
+
+    
+    for (uint i = 0; i < range.cluster_count; ++i) {
+        candidate_cluster_indices[write_offset + i] = range.first_cluster + i;
+    }
+}

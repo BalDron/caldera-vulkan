@@ -1,0 +1,128 @@
+#version 450
+#include "common.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct AABB {
+    vec4 min_point;
+    vec4 max_point;
+};
+
+struct DrawIndexedIndirectCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer BoundingBoxes {
+    AABB aabbs[];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer InputCommands {
+    DrawIndexedIndirectCommand input_commands[];
+};
+
+layout(std430, set = 0, binding = 2) writeonly buffer OutputCommands {
+    DrawIndexedIndirectCommand output_commands[];
+};
+
+layout(std430, set = 0, binding = 3) buffer CountBuffer {
+    uint draw_count;
+};
+
+layout(set = 0, binding = 4) uniform sampler2D hiz_texture;
+
+layout(push_constant) uniform CullConstants {
+    mat4 view_proj;
+    vec2 screen_dimensions;
+    uint total_objects;
+} push_constants;
+
+layout(std430, set = 0, binding = 5) writeonly buffer VisibleInstanceIndicesBuffer {
+    uint visible_instance_ids[];
+};
+
+bool IsAABBInFrustum(vec3 min_p, vec3 max_p, mat4 vp) {
+    vec4 planes[6];
+    planes[0] = vec4(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]);
+    planes[1] = vec4(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]);
+    planes[2] = vec4(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]);
+    planes[3] = vec4(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]);
+    planes[4] = vec4(vp[0][2],            vp[1][2],            vp[2][2],            vp[3][2]);
+    planes[5] = vec4(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]);
+
+    for (int i = 0; i < 6; ++i) {
+        vec3 normal = planes[i].xyz;
+        float d = planes[i].w;
+
+        vec3 p = min_p;
+        if (normal.x >= 0.0) p.x = max_p.x;
+        if (normal.y >= 0.0) p.y = max_p.y;
+        if (normal.z >= 0.0) p.z = max_p.z;
+
+        if (dot(normal, p) + d < 0.0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsAABBOccluded(vec3 min_p, vec3 max_p, mat4 vp, vec2 screen_size) {
+    vec3 box_corners[8] = vec3[8](
+        vec3(min_p.x, min_p.y, min_p.z),
+        vec3(max_p.x, min_p.y, min_p.z),
+        vec3(min_p.x, max_p.y, min_p.z),
+        vec3(max_p.x, max_p.y, min_p.z),
+        vec3(min_p.x, min_p.y, max_p.z),
+        vec3(max_p.x, min_p.y, max_p.z),
+        vec3(min_p.x, max_p.y, max_p.z),
+        vec3(max_p.x, max_p.y, max_p.z)
+    );
+
+    vec3 min_ndc = vec3(1.0, 1.0, 1.0);
+    vec3 max_ndc = vec3(-1.0, -1.0, 0.0);
+
+    for (int i = 0; i < 8; ++i) {
+        vec4 clip = vp * vec4(box_corners[i], 1.0);
+        if (clip.w <= 0.0) return false;
+
+        vec3 ndc = clip.xyz / clip.w;
+        min_ndc = min(min_ndc, ndc);
+        max_ndc = max(max_ndc, ndc);
+    }
+
+    vec2 min_uv = clamp(min_ndc.xy * 0.5 + 0.5, 0.0, 1.0);
+    vec2 max_uv = clamp(max_ndc.xy * 0.5 + 0.5, 0.0, 1.0);
+
+    vec2 size = (max_uv - min_uv) * screen_size;
+    float max_dim = max(size.x, size.y);
+    float mip = max(0.0, ceil(log2(max(1.0, max_dim))));
+
+    vec4 d;
+    d.x = textureLod(hiz_texture, vec2(min_uv.x, min_uv.y), mip).r;
+    d.y = textureLod(hiz_texture, vec2(max_uv.x, min_uv.y), mip).r;
+    d.z = textureLod(hiz_texture, vec2(min_uv.x, max_uv.y), mip).r;
+    d.w = textureLod(hiz_texture, vec2(max_uv.x, max_uv.y), mip).r;
+    float max_depth_in_region = max(max(d.x, d.y), max(d.z, d.w));
+
+    float depth_bias = 0.0;
+    return (min_ndc.z - depth_bias) > max_depth_in_region;
+}
+
+void main() {
+    uint g_idx = gl_GlobalInvocationID.x;
+    if (g_idx >= push_constants.total_objects) return;
+
+    vec3 min_p = aabbs[g_idx].min_point.xyz;
+    vec3 max_p = aabbs[g_idx].max_point.xyz;
+
+    
+    if (!IsAABBInFrustum(min_p, max_p, push_constants.view_proj)) return;
+    if (IsAABBOccluded(min_p, max_p, push_constants.view_proj, push_constants.screen_dimensions)) return;
+
+    uint write_index = atomicAdd(draw_count, 1);
+    output_commands[write_index] = input_commands[g_idx];
+    visible_instance_ids[write_index] = g_idx;
+}

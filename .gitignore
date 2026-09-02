@@ -1,0 +1,7 @@
+build/*
+.cache/*
+usd_install/*
+*.log
+some_config*
+assets/*
+paving-stones.jpg
