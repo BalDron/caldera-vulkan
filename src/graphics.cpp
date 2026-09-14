@@ -846,7 +846,7 @@ void Graphics::CreateRenderPass() {
 
 void Graphics::CreateCullPipeline() {
     
-    std::array<VkDescriptorSetLayoutBinding, 6> bindings{}; 
+    std::array<VkDescriptorSetLayoutBinding, 7> bindings{}; 
     for (uint32_t i = 0; i < 4; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -862,6 +862,11 @@ void Graphics::CreateCullPipeline() {
     bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[5].descriptorCount = 1;
     bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[6].binding = 6;
+    bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[6].descriptorCount = 1;
+    bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
     VkDescriptorSetLayoutCreateInfo layout_info{};
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1662,11 +1667,12 @@ VkDescriptorSet Graphics::CreateCullDescriptorSet(
     BufferHandle in_cmds_buffer,
     BufferHandle out_cmds_buffer,
     BufferHandle count_buffer,
-    BufferHandle visible_instance_ids_buffer
+    BufferHandle visible_instance_ids_buffer,
+    BufferHandle cpu_visible_indices_buffer
 ) {
     if (cull_descriptor_pool_ == VK_NULL_HANDLE) {
         std::array<VkDescriptorPoolSize, 2> pool_sizes{};
-        pool_sizes[0] = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16 };
+        pool_sizes[0] = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 24 };
         pool_sizes[1] = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 };
 
         VkDescriptorPoolCreateInfo pool_info{};
@@ -1688,19 +1694,20 @@ VkDescriptorSet Graphics::CreateCullDescriptorSet(
         throw std::runtime_error("failed to allocate cull descriptor set");
     }
 
-    std::array<VkDescriptorBufferInfo, 5> buffer_infos{};
+    std::array<VkDescriptorBufferInfo, 6> buffer_infos{};
     buffer_infos[0] = { aabb_buffer.buffer, 0, VK_WHOLE_SIZE };
     buffer_infos[1] = { in_cmds_buffer.buffer, 0, VK_WHOLE_SIZE };
     buffer_infos[2] = { out_cmds_buffer.buffer, 0, VK_WHOLE_SIZE };
     buffer_infos[3] = { count_buffer.buffer, 0, VK_WHOLE_SIZE };
     buffer_infos[4] = { visible_instance_ids_buffer.buffer, 0, VK_WHOLE_SIZE };
+    buffer_infos[5] = { cpu_visible_indices_buffer.buffer, 0, VK_WHOLE_SIZE };
 
     VkDescriptorImageInfo hiz_image_info = {};
     hiz_image_info.sampler = hiz_sampler_;
     hiz_image_info.imageView = depth_hiz_view_;
     hiz_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    std::array<VkWriteDescriptorSet, 6> writes = {};
+    std::array<VkWriteDescriptorSet, 7> writes = {};
     for (uint32_t i = 0; i < 4; ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = descriptor_set;
@@ -1725,6 +1732,14 @@ VkDescriptorSet Graphics::CreateCullDescriptorSet(
     writes[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[5].descriptorCount = 1;
     writes[5].pBufferInfo = &buffer_infos[4];
+
+    writes[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[6].dstSet = descriptor_set;
+    writes[6].dstBinding = 6;
+    writes[6].dstArrayElement = 0;
+    writes[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[6].descriptorCount = 1;
+    writes[6].pBufferInfo = &buffer_infos[5];
 
     vkUpdateDescriptorSets(logical_device_, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     return descriptor_set;
@@ -1792,7 +1807,8 @@ BufferHandle Graphics::CreateStorageBuffer(VkDeviceSize size, const void* data) 
         size,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
         VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
     );
 
@@ -1879,7 +1895,27 @@ void Graphics::CullFrustum(
     );
 }
 
+uint32_t Graphics::ReadBufferUint32(BufferHandle handle) {
+    BufferHandle staging = CreateBuffer(
+        sizeof(uint32_t),
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    );
 
+    VkCommandBuffer cmd = BeginTransientCommandBuffer();
+    VkBufferCopy copy{0, 0, sizeof(uint32_t)};
+    vkCmdCopyBuffer(cmd, handle.buffer, staging.buffer, 1, &copy);
+    EndTransientCommandBuffer(cmd);
+
+    uint32_t result = 0;
+    void* mapped;
+    vkMapMemory(logical_device_, staging.memory, 0, sizeof(uint32_t), 0, &mapped);
+    std::memcpy(&result, mapped, sizeof(uint32_t));
+    vkUnmapMemory(logical_device_, staging.memory);
+
+    DestroyBuffer(staging);
+    return result;
+}
 
 #pragma endregion
 

@@ -74,6 +74,8 @@ std::int32_t main(std::int32_t argc, gsl::zstring* argv) {
         }
     }
 
+    std::cout << "initial mesh count: " << meshes.size() << "\n";
+
     veng::SceneBuffers merged = veng::MergeMeshes(meshes);
     veng::ClusterSceneBuffers cluster_data = veng::BuildClusters(merged.vertices, merged.indices, merged.draw_commands);
     if (meshes.empty() || merged.vertices.empty() || cluster_data.clusters.empty()) {
@@ -99,12 +101,19 @@ std::int32_t main(std::int32_t argc, gsl::zstring* argv) {
     veng::BufferHandle final_cluster_count_buf = graphics.CreateStorageBuffer(sizeof(uint32_t), nullptr);
 
 
+    VkDeviceSize max_indices_size = sizeof(uint32_t) * meshes.size();
+    veng::BufferHandle cpu_visible_indices_ssbo = graphics.CreateBuffer(
+        max_indices_size,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+    );
     VkDescriptorSet cull_set = graphics.CreateCullDescriptorSet(
         aabb_ssbo,
         in_cmds_ssbo,
         out_cmds_ssbo,
         visible_inst_count_buf,
-        visible_inst_ids_buf
+        visible_inst_ids_buf,
+        cpu_visible_indices_ssbo
     );
     VkDescriptorSet expand_set = graphics.CreateExpandDescriptorSet(
         visible_inst_count_buf,
@@ -157,12 +166,32 @@ std::int32_t main(std::int32_t argc, gsl::zstring* argv) {
     std::fstream framerate_file;
     framerate_file.open("vulkan_framerate.txt", std::ios::out);
 
+    std::fstream quad_tree_cpu_count_file;
+    quad_tree_cpu_count_file.open("quad_tree_cpu_count.txt", std::ios::out);
+    uint32_t quad_tree_cpu_count = 0;
+
+    std::fstream last_draw_gpu_count_file;
+    last_draw_gpu_count_file.open("last_draw_gpu_count_file.txt", std::ios::out);
+    uint32_t last_draw_gpu_count = 0;
+
+    std::vector<uint32_t> active_indices;
+    active_indices.reserve(visible_meshes.size());
+    void* mapped_cpu_indices = nullptr;
+    vkMapMemory(graphics.logical_device_, cpu_visible_indices_ssbo.memory, 0, max_indices_size, 0, &mapped_cpu_indices);
+
+
+    glm::mat4 projection = glm::perspective(glm::radians(90.0f), 1920.0f / 1080.0f, 0.1f, 10000.0f);
+    projection[1][1] *= -1.0f;
+    glm::mat4 zUpToYUp = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+
+    auto inverse_zUpToYUp = glm::inverse(zUpToYUp);
+
     float last_frame_time = static_cast<float>(glfwGetTime());
     float timestamp = 0.0f;
 
     while (!window.ShouldClose()) {
         glfwPollEvents();
-        std::cout << camera_pos.x << " " << camera_pos.y << " " << camera_pos.z << std::endl;
+        // std::cout << camera_pos.x << " " << camera_pos.y << " " << camera_pos.z << std::endl;
         
         float current_frame_time = static_cast<float>(glfwGetTime());
         float delta_time = current_frame_time - last_frame_time;
@@ -181,7 +210,9 @@ std::int32_t main(std::int32_t argc, gsl::zstring* argv) {
 
             if (delta_time > 0.0f) {
                 float fps = 1.0f / delta_time;
-                framerate_file << timestamp - start_delay << " " << fps << std::endl;
+                framerate_file << timestamp - start_delay << " " << fps << "\n";
+                quad_tree_cpu_count_file << timestamp - start_delay << " " << quad_tree_cpu_count << "\n";
+                last_draw_gpu_count_file << timestamp - start_delay << " " << last_draw_gpu_count << "\n";
             }
             if (current_target_idx < positions_to_visit.size() && !has_finished_moving) {
                 glm::vec3 target = positions_to_visit[current_target_idx];
@@ -207,6 +238,8 @@ std::int32_t main(std::int32_t argc, gsl::zstring* argv) {
                 if (total_rotated_angle >= 360.0f) {
                     has_finished_rotating = true;
                     framerate_file.close();
+                    quad_tree_cpu_count_file.close();
+                    last_draw_gpu_count_file.close();
                 }
             }
         }
@@ -252,26 +285,36 @@ std::int32_t main(std::int32_t argc, gsl::zstring* argv) {
         }
 
         glm::mat4 view = glm::lookAt(camera_pos, camera_pos + camera_front, camera_up);
-        glm::mat4 projection = glm::perspective(glm::radians(90.0f), 1920.0f / 1080.0f, 0.1f, 10000.0f);
-        projection[1][1] *= -1.0f;
-        glm::mat4 zUpToYUp = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
         graphics.SetViewProjection(view * zUpToYUp, projection);
 
-        glm::mat4 view_proj = projection * view;
+        glm::mat4 view_proj = projection * view * zUpToYUp;
         veng::Frustum camera_frustum = veng::Frustum::FromViewProjection(view_proj);
         quadtree.QueryFrustum(camera_frustum, visible_meshes);
+        quad_tree_cpu_count = visible_meshes.size();
+
+        active_indices.clear();
+
+        const veng::Mesh* mesh_base_ptr = meshes.data();
+        for (const veng::Mesh* v_mesh : visible_meshes) {
+            uint32_t global_idx = static_cast<uint32_t>(v_mesh - mesh_base_ptr);
+            active_indices.push_back(global_idx);
+        }
+
+        if (!active_indices.empty()) {
+            std::memcpy(mapped_cpu_indices, active_indices.data(), sizeof(uint32_t) * active_indices.size());
+        }
 
         if (graphics.BeginFrame()) {
             
             glm::mat4 total_vp = projection * (view * zUpToYUp);
-            glm::vec3 cluster_space_cam_pos = glm::vec3(glm::inverse(zUpToYUp) * glm::vec4(camera_pos, 1.0f));            
+            glm::vec3 cluster_space_cam_pos = glm::vec3(inverse_zUpToYUp * glm::vec4(camera_pos, 1.0f));            
             
             graphics.CullFrustum(
                 cull_set,
                 out_cmds_ssbo,
                 visible_inst_count_buf,
                 total_vp,
-                static_cast<uint32_t>(merged.draw_commands.size())
+                static_cast<uint32_t>(active_indices.size())
             );
             graphics.ExpandAndCullClusters(
                 expand_set,
@@ -291,6 +334,7 @@ std::int32_t main(std::int32_t argc, gsl::zstring* argv) {
                 final_cluster_count_buf,
                 static_cast<uint32_t>(cluster_data.clusters.size())
             );
+            // last_draw_gpu_count = graphics.ReadBufferUint32(final_cluster_count_buf);
             
             graphics.EndRenderPass();
             graphics.BuildHiZPyramid();
@@ -299,6 +343,7 @@ std::int32_t main(std::int32_t argc, gsl::zstring* argv) {
         }
     }
 
+    vkUnmapMemory(graphics.logical_device_, cpu_visible_indices_ssbo.memory);
     graphics.DestroyBuffer(global_vb);
     graphics.DestroyBuffer(global_ib);
     graphics.DestroyBuffer(aabb_ssbo);
@@ -312,6 +357,7 @@ std::int32_t main(std::int32_t argc, gsl::zstring* argv) {
     graphics.DestroyBuffer(candidate_counter_buf);
     graphics.DestroyBuffer(out_cluster_draw_cmds);
     graphics.DestroyBuffer(final_cluster_count_buf);
+    graphics.DestroyBuffer(cpu_visible_indices_ssbo);
 
     return EXIT_SUCCESS;
 }

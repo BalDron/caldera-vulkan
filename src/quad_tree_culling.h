@@ -24,7 +24,9 @@ struct Frustum {
 
         for (auto& plane : f.planes) {
             float length = glm::length(glm::vec3(plane));
-            if (length > 0.0f) plane /= length;
+            if (length > 0.0f) {
+                plane /= length;
+            }
         }
         return f;
     }

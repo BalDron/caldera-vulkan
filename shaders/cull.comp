@@ -44,6 +44,10 @@ layout(std430, set = 0, binding = 5) writeonly buffer VisibleInstanceIndicesBuff
     uint visible_instance_ids[];
 };
 
+layout(std430, set = 0, binding = 6) readonly buffer ActiveIndices {
+    uint indices[];
+} active_indices;
+
 bool IsAABBInFrustum(vec3 min_p, vec3 max_p, mat4 vp) {
     vec4 planes[6];
     planes[0] = vec4(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]);
@@ -115,14 +119,17 @@ void main() {
     uint g_idx = gl_GlobalInvocationID.x;
     if (g_idx >= push_constants.total_objects) return;
 
-    vec3 min_p = aabbs[g_idx].min_point.xyz;
-    vec3 max_p = aabbs[g_idx].max_point.xyz;
+    uint global_mesh_idx = active_indices.indices[g_idx];
+
+    vec3 min_p = aabbs[global_mesh_idx].min_point.xyz;
+    vec3 max_p = aabbs[global_mesh_idx].max_point.xyz;
 
     
     if (!IsAABBInFrustum(min_p, max_p, push_constants.view_proj)) return;
     if (IsAABBOccluded(min_p, max_p, push_constants.view_proj, push_constants.screen_dimensions)) return;
-
+    
     uint write_index = atomicAdd(draw_count, 1);
-    output_commands[write_index] = input_commands[g_idx];
-    visible_instance_ids[write_index] = g_idx;
+    
+    output_commands[write_index] = input_commands[global_mesh_idx];
+    visible_instance_ids[write_index] = global_mesh_idx;
 }

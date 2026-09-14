@@ -63,10 +63,13 @@ namespace veng {
             BufferHandle in_cmds_buffer,
             BufferHandle out_cmds_buffer,
             BufferHandle count_buffer,
-            BufferHandle visible_instance_ids_buffer
+            BufferHandle visible_instance_ids_buffer,
+            BufferHandle cpu_visible_indices_buffer
         );
         
         void EndFrame();
+
+        BufferHandle CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties);
 
         BufferHandle CreateVertexBuffer(gsl::span<Vertex> vertices);
         BufferHandle CreateIndexBuffer(gsl::span<std::uint32_t> indices);
@@ -104,6 +107,9 @@ namespace veng {
             const glm::vec3& camera_pos,
             uint32_t total_scene_clusters
         );
+
+        VkDevice logical_device_ = VK_NULL_HANDLE;
+        uint32_t ReadBufferUint32(BufferHandle handle);
 
     private:
 
@@ -179,7 +185,6 @@ namespace veng {
 
         std::uint32_t FindMemoryTypes(std::uint32_t type_bits_filter, VkMemoryPropertyFlags required_properties);
 
-        BufferHandle CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties);
         VkCommandBuffer BeginTransientCommandBuffer();
         void EndTransientCommandBuffer(VkCommandBuffer command_buffer);
         void CreateUniformBuffers();
@@ -211,7 +216,6 @@ namespace veng {
         VkDebugUtilsMessengerEXT debug_messenger_;
 
         VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
-        VkDevice logical_device_ = VK_NULL_HANDLE;
         VkQueue graphics_queue_ = VK_NULL_HANDLE;
         VkQueue present_queue_ = VK_NULL_HANDLE;
         
